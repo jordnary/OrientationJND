@@ -1,0 +1,27 @@
+{
+  "reference_orientation_deg": 0.0,
+  "orientation_differences_deg": [0.5, 1.0, 2.0, 4.0, 8.0, 16.0],
+  "repeats_per_condition": {"demo": 2, "formal": 12},
+  "practice_trials": 8,
+  "break_every": 24,
+  "timing": {
+    "fixation_s": 0.5,
+    "first_stimulus_s": 0.5,
+    "interval_s": 1.0,
+    "second_stimulus_s": 0.5,
+    "response_timeout_s": 5.0,
+    "feedback_s": 0.6,
+    "iti_s": 0.3
+  },
+  "display": {
+    "window_size_px": [1280, 720],
+    "full_screen_formal": true,
+    "fallback_refresh_hz": 60.0,
+    "font": "Microsoft YaHei"
+  },
+  "gabor": {
+    "size_height": 0.3,
+    "spatial_frequency_cycles_per_stimulus": 7.2,
+    "contrast": 0.8
+  }
+}
