@@ -7,6 +7,9 @@ from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from matplotlib import get_data_path
+from matplotlib.font_manager import FontProperties
+from matplotlib.mathtext import MathTextParser
 from pypdf import PdfWriter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
@@ -14,7 +17,63 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Flowable, Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+
+class MathEquation(Flowable):
+    """Draw typeset mathematics as searchable vector glyphs and fraction rules."""
+
+    def __init__(self, expression, font_size=11.5):
+        super().__init__()
+        self.math = MathTextParser("path").parse(
+            f"${expression}$", dpi=72,
+            prop=FontProperties(size=font_size, math_fontfamily="stix"))
+        self.width = float(self.math.width)
+        self.height = float(self.math.height) + 4
+        self.hAlign = "CENTER"
+        self.spaceBefore = 4
+        self.spaceAfter = 8
+        self.glyphs = []
+        for font, size, character, *position in self.math.glyphs:
+            # Newer Matplotlib releases also include a glyph index before x/y.
+            x, y = position[-2:]
+            font_name = "Equation-" + Path(font.fname).stem
+            if font_name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(font_name, font.fname))
+            self.glyphs.append((font_name, size, chr(character), x, y))
+
+    def wrap(self, available_width, available_height):
+        if self.width > available_width:
+            raise ValueError("Display equation exceeds the report column width")
+        return self.width, self.height
+
+    def draw(self):
+        self.canv.saveState()
+        self.canv.setFillColor(colors.black)
+        baseline = float(self.math.depth) + 2
+        for font, size, character, x, y in self.glyphs:
+            self.canv.setFont(font, size)
+            self.canv.drawString(float(x), float(y) + baseline, character)
+        for x, y, width, height in self.math.rects:
+            self.canv.rect(float(x), float(y) + baseline,
+                           float(width), float(height), stroke=0, fill=1)
+        self.canv.restoreState()
+
+
+def inline_math(expression):
+    """Keep short inline variables in a math font with real subscripts."""
+    match = re.fullmatch(r"(\\mathrm\{BA\}|[A-Za-z]|\\delta)(?:_\{?(\\delta|\d+)\}?)?", expression)
+    if match is None:
+        raise ValueError("Unsupported inline math expression")
+    symbol, subscript = match.groups()
+    font_name = "ReportMath" if symbol == r"\mathrm{BA}" else "ReportMathItalic"
+    symbol = "BA" if symbol == r"\mathrm{BA}" else symbol.replace(r"\delta", "δ")
+    result = f'<font name="{font_name}">{symbol}</font>'
+    if subscript:
+        subscript_font = "ReportMathItalic" if subscript == r"\delta" else "ReportMath"
+        subscript = subscript.replace(r"\delta", "δ")
+        result += f'<sub rise="20%" size="70%"><font name="{subscript_font}">{subscript}</font></sub>'
+    return "<nobr>" + result + "</nobr>"
 
 
 class ReportDocTemplate(SimpleDocTemplate):
@@ -32,6 +91,7 @@ class ReportDocTemplate(SimpleDocTemplate):
 
 def text_markup(text):
     result = escape(text)
+    result = re.sub(r"\$([^$]+)\$", lambda match: inline_math(match.group(1)), result)
     # Make reference URLs clickable without exposing local file locations.
     return re.sub(r"https://[^\s（）]+", lambda match: '<link href="' + match.group() + '" color="#244B66">' + match.group() + '</link>', result)
 
@@ -40,6 +100,9 @@ def render_report(source, output, regular_font, bold_font):
     pdfmetrics.registerFont(TTFont("ReportBody", str(regular_font), subfontIndex=0))
     pdfmetrics.registerFont(TTFont("ReportBold", str(bold_font), subfontIndex=0))
     pdfmetrics.registerFontFamily("ReportBody", normal="ReportBody", bold="ReportBold", italic="ReportBody", boldItalic="ReportBold")
+    math_fonts = Path(get_data_path()) / "fonts" / "ttf"
+    pdfmetrics.registerFont(TTFont("ReportMath", str(math_fonts / "STIXGeneral.ttf")))
+    pdfmetrics.registerFont(TTFont("ReportMathItalic", str(math_fonts / "STIXGeneralItalic.ttf")))
     output.parent.mkdir(parents=True, exist_ok=True)
     lines = source.read_text(encoding="utf-8").splitlines()
     title = next((line[2:].strip() for line in lines if line.startswith("# ")), "实验报告")
@@ -60,7 +123,6 @@ def render_report(source, output, regular_font, bold_font):
         "cell": ParagraphStyle("Cell", fontSize=9.2, leading=13, alignment=TA_CENTER, **base),
         "note": ParagraphStyle("Note", fontSize=9, leading=13, spaceAfter=8, **base),
         "ref": ParagraphStyle("Reference", fontSize=9.5, leading=15, spaceAfter=9, alignment=TA_LEFT, **base),
-        "equation": ParagraphStyle("Equation", fontSize=10, leading=16, spaceAfter=6, alignment=TA_CENTER, **base),
     }
     story = []
     index = 0
@@ -71,6 +133,9 @@ def render_report(source, output, regular_font, bold_font):
             continue
         if line == "<!-- pagebreak -->":
             story.append(PageBreak())
+            continue
+        if line.startswith("$$") and line.endswith("$$"):
+            story.append(MathEquation(line[2:-2].strip()))
             continue
         if line.startswith("# "):
             story.append(Paragraph(text_markup(line[2:]), styles["title"]))
@@ -121,8 +186,6 @@ def render_report(source, output, regular_font, bold_font):
             style = "note"
         elif re.match(r"\[\d\]", line):
             style = "ref"
-        elif re.match(r"^(Hδ|C|BAδ|δ75) = ", line):
-            style = "equation"
         else:
             style = "body"
         story.append(Paragraph(text_markup(line), styles[style]))
