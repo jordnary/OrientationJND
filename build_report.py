@@ -3,9 +3,11 @@
 import argparse
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from pypdf import PdfWriter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import A4
@@ -13,6 +15,19 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Image, KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+
+class ReportDocTemplate(SimpleDocTemplate):
+    """Attach navigation bookmarks to the rendered section headings."""
+
+    def afterFlowable(self, flowable):
+        if isinstance(flowable, Paragraph) and hasattr(flowable, "outline_level"):
+            # Use the final page and position after pagination, including splits.
+            key = f"section-{self.seq.nextf('outline')}"
+            heading_top = self.frame._y + flowable.height + flowable.getSpaceAfter()
+            self.canv.bookmarkHorizontalAbsolute(key, heading_top)
+            self.canv.addOutlineEntry(flowable.getPlainText(), key,
+                                     level=flowable.outline_level, closed=False)
 
 
 def text_markup(text):
@@ -26,10 +41,13 @@ def render_report(source, output, regular_font, bold_font):
     pdfmetrics.registerFont(TTFont("ReportBold", str(bold_font), subfontIndex=0))
     pdfmetrics.registerFontFamily("ReportBody", normal="ReportBody", bold="ReportBold", italic="ReportBody", boldItalic="ReportBold")
     output.parent.mkdir(parents=True, exist_ok=True)
+    lines = source.read_text(encoding="utf-8").splitlines()
+    title = next((line[2:].strip() for line in lines if line.startswith("# ")), "实验报告")
+    pdf_buffer = BytesIO()
     width, height = A4
     content_width = width - 100
-    doc = SimpleDocTemplate(str(output), pagesize=A4, rightMargin=50, leftMargin=50,
-                            topMargin=43, bottomMargin=45, title="序列呈现 Gabor 光栅的方位差辨别实验报告",
+    doc = ReportDocTemplate(pdf_buffer, pagesize=A4, rightMargin=50, leftMargin=50,
+                            topMargin=43, bottomMargin=45, title=title,
                             author="", creator="", subject="Orientation discrimination study", pageCompression=1)
     base = dict(fontName="ReportBody", textColor=colors.black, wordWrap="CJK", splitLongWords=True)
     styles = {
@@ -44,7 +62,6 @@ def render_report(source, output, regular_font, bold_font):
         "ref": ParagraphStyle("Reference", fontSize=9.5, leading=15, spaceAfter=9, alignment=TA_LEFT, **base),
         "equation": ParagraphStyle("Equation", fontSize=10, leading=16, spaceAfter=6, alignment=TA_CENTER, **base),
     }
-    lines = source.read_text(encoding="utf-8").splitlines()
     story = []
     index = 0
     while index < len(lines):
@@ -60,7 +77,9 @@ def render_report(source, output, regular_font, bold_font):
             continue
         if line.startswith("### ") or line.startswith("## "):
             prefix = "### " if line.startswith("### ") else "## "
-            story.append(Paragraph(text_markup(line[len(prefix):]), styles["h2" if prefix == "### " else "h1"]))
+            heading = Paragraph(text_markup(line[len(prefix):]), styles["h2" if prefix == "### " else "h1"])
+            heading.outline_level = 1 if prefix == "### " else 0
+            story.append(heading)
             continue
         if line.startswith("!["):
             match = re.fullmatch(r"!\[(.*?)\]\((.*?)\)", line)
@@ -98,7 +117,7 @@ def render_report(source, output, regular_font, bold_font):
             continue
         if line.startswith("表 "):
             style = "table_title"
-        elif line.startswith("注：") or line.startswith("实验日期：") or line.startswith("关键词："):
+        elif line.startswith("注：") or line.startswith("关键词："):
             style = "note"
         elif re.match(r"\[\d\]", line):
             style = "ref"
@@ -116,6 +135,13 @@ def render_report(source, output, regular_font, bold_font):
         canvas.restoreState()
 
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    pdf_buffer.seek(0)
+    writer = PdfWriter(clone_from=pdf_buffer)
+    # ReportLab adds calendar metadata automatically; the submission omits it.
+    writer.metadata = {key: value for key, value in writer.metadata.items()
+                       if key not in {"/CreationDate", "/ModDate"}}
+    writer.page_mode = "/UseOutlines"
+    writer.write(output)
     print("Report PDF created.")
 
 
