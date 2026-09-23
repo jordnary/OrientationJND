@@ -117,7 +117,7 @@ def audit_session(meta, rows):
             assert sum(float(r["signed_delta_deg"]) == sign * delta for r in group) == repeats // 2
 
 
-def build_study(data_dir, results_dir):
+def build_study(data_dir, results_dir, figures_dir=Path("pics")):
     output = results_dir / "study"
     output.mkdir(parents=True, exist_ok=True)
     inventory, participants, individual, all_main, flagged, hashes = [], [], [], [], [], []
@@ -257,19 +257,20 @@ def build_study(data_dir, results_dir):
         if table:
             write_csv(output / (name + ".csv"), table)
     (output / "study_summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    plot_study(output, individual, pooled, sensitivity, latency)
+    plot_study(figures_dir, individual, pooled, sensitivity, latency, fitted_rows, exploratory)
     print("Study audit passed: 8 sessions; existing summaries and condition tables reproduced.")
     print("Formal trials:", len(all_main), "Correct:", result["n_correct"], "Flagged:", len(flagged))
     print("Study outputs: results/study/")
     return result
 
 
-def plot_study(output, individual, pooled, sensitivity, latency):
+def plot_study(output, individual, pooled, sensitivity, latency, fitted_rows, exploratory):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import PercentFormatter
 
+    output.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10, "axes.spines.top": False,
                          "axes.spines.right": False, "savefig.facecolor": "white"})
     levels = [p["delta_deg"] for p in pooled]
@@ -279,7 +280,7 @@ def plot_study(output, individual, pooled, sensitivity, latency):
         ax.set_xscale("log", base=2)
         ax.set_xticks(levels, [str(x).removesuffix(".0") for x in levels])
         ax.set_xlabel("Orientation difference (deg)")
-        ax.set_ylim(.35, 1.025)
+        ax.set_ylim(0, 1.025)
         ax.yaxis.set_major_formatter(PercentFormatter(1))
         ax.grid(alpha=.18)
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), layout="constrained")
@@ -303,13 +304,14 @@ def plot_study(output, individual, pooled, sensitivity, latency):
     fig.savefig(output / "accuracy_overview.png", dpi=220)
     plt.close(fig)
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.6), layout="constrained")
+    latency_limit = max(1.0, max(r["median_rt_s"] for r in latency if r["median_rt_s"] is not None) * 1.1)
     for ax, subset, title in zip(axes, ("all_responses", "correct"), ("A  All different-trial responses", "B  Correct different-trial responses")):
         for person, color in zip(people, colors):
             pts = [r for r in latency if r["participant"] == person and r["subset"] == subset]
             ax.plot(levels, [r["median_rt_s"] for r in pts], "o-", label=person, color=color, linewidth=1.2, markersize=4)
         ax.set_xscale("log", base=2)
         ax.set_xticks(levels, [str(x).removesuffix(".0") for x in levels])
-        ax.set(xlabel="Orientation difference (deg)", ylabel="Median response time (s)", title=title, ylim=(0, 1.7))
+        ax.set(xlabel="Orientation difference (deg)", ylabel="Median response time (s)", title=title, ylim=(0, latency_limit))
         ax.grid(alpha=.18)
         ax.legend(ncol=2, fontsize=8)
     fig.savefig(output / "response_latency.png", dpi=220)
@@ -323,14 +325,51 @@ def plot_study(output, individual, pooled, sensitivity, latency):
     ax.legend(fontsize=9, loc="lower right")
     fig.savefig(output / "timing_sensitivity.png", dpi=220)
     plt.close(fig)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6), layout="constrained")
+    for ax, person, color in zip(axes.flat, people, colors):
+        pts = [r for r in fitted_rows if r["participant"] == person]
+        estimate = next(r["estimate_deg"] for r in exploratory if r["participant"] == person)
+        curve_x, curve_y = [], []
+        for left, right in zip(pts, pts[1:]):
+            for step in range(41):
+                fraction = step / 40
+                curve_x.append(left["delta_deg"] + fraction * (right["delta_deg"] - left["delta_deg"]))
+                curve_y.append(left["fitted_balanced_accuracy"] + fraction * (right["fitted_balanced_accuracy"] - left["fitted_balanced_accuracy"]))
+        ax.plot(curve_x, curve_y, "-", color=color, label="Isotonic fit + interpolation", linewidth=1.5)
+        ax.scatter(levels, [r["observed_balanced_accuracy"] for r in pts], facecolors="white", edgecolors=color, s=34, label="Observed", zorder=4)
+        ax.axhline(.75, color=".5", linestyle="--", linewidth=.8)
+        if estimate is not None:
+            ax.axvline(estimate, color=color, linestyle=":", linewidth=1)
+            ax.scatter([estimate], [.75], marker="x", color=color, s=40, zorder=5)
+        accuracy_axes(ax)
+        ax.set_ylim(.4, 1.025)
+        ax.set_title(f"{person}  |  Exploratory threshold = {estimate:.3f} deg", fontsize=10)
+        ax.set_ylabel("Balanced accuracy")
+        ax.legend(loc="lower right", fontsize=8)
+    fig.savefig(output / "psychometric_fits.png", dpi=220)
+    plt.close(fig)
+    from matplotlib.patches import FancyBboxPatch
+    fig, ax = plt.subplots(figsize=(10, 1.5), layout="constrained")
+    labels = ["Fixation\n0.5 s", "Reference\n0.5 s", "Interval\n1.0 s", "Comparison\n0.5 s", "Response\nup to 5.0 s", "Intertrial\n0.3 s"]
+    for i, label in enumerate(labels):
+        ax.add_patch(FancyBboxPatch((i * 1.7, .28), 1.45, .68, boxstyle="round,pad=0.05", facecolor="#EFF4F7", edgecolor="#607580", linewidth=.9))
+        ax.text(i * 1.7 + .725, .62, label, ha="center", va="center", fontsize=10)
+        if i < len(labels) - 1:
+            ax.annotate("", xy=((i + 1) * 1.7 - .08, .62), xytext=(i * 1.7 + 1.52, .62), arrowprops={"arrowstyle": "->", "color": "#465860"})
+    ax.text(7.525, .06, "RT starts at response prompt onset", ha="center", fontsize=8, color="#465860")
+    ax.set(xlim=(-.15, 10.1), ylim=(-.12, 1.15))
+    ax.axis("off")
+    fig.savefig(output / "trial_timeline.png", dpi=220)
+    plt.close(fig)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
+    parser.add_argument("--figures-dir", type=Path, default=Path("pics"))
     args = parser.parse_args()
-    build_study(args.data_dir, args.results_dir)
+    build_study(args.data_dir, args.results_dir, args.figures_dir)
 
 
 if __name__ == "__main__":

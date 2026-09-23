@@ -17,5 +17,6 @@ results/
 tmp/
 .local/
 *.png
+!pics/*.png
 *.pdf
 *.zip
